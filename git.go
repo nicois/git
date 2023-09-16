@@ -1,12 +1,13 @@
 package git
 
 import (
-	"bytes"
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -19,22 +20,30 @@ import (
 type git struct {
 	root            string
 	defaultUpstream string
+	treatAsTracked  []*regexp.Regexp
 }
 
-func (g *git) GetBranch() ([]byte, error) {
-	proc := exec.Command("git", "branch", "--show-current")
-	return proc.CombinedOutput()
+func (g *git) Run(args ...string) (string, error) {
+	proc := exec.Command("git", args...)
+	if b, err := proc.CombinedOutput(); err == nil {
+		return string(b), nil
+	} else {
+		return "", err
+	}
 }
 
-func (g *git) GetSha() ([]byte, error) {
+func (g *git) GetBranch() (string, error) {
+	return g.Run("branch", "--show-current")
+}
+
+func (g *git) GetSha() (string, error) {
 	/*
 	   This does not check if the commit is dirty.
 	*/
-	proc := exec.Command("git", "rev-parse", "HEAD")
-	return proc.CombinedOutput()
+	return g.Run("rev-parse", "HEAD")
 }
 
-func (g *git) GetWorkingHash() ([]byte, error) {
+func (g *git) GetWorkingHash() (string, error) {
 	/*
 		A SHA based on both the git commit and any "dirty"
 		changes made since that commit, whether staged or not.
@@ -43,17 +52,17 @@ func (g *git) GetWorkingHash() ([]byte, error) {
 	out, err := proc.CombinedOutput()
 	if err != nil {
 		// probably not a git repo
-		return []byte{}, err
+		return "", err
 	}
 	hasher := sha256.New()
 	hasher.Write(out)
 	proc = exec.Command("git", "rev-parse", "HEAD")
 	out, err = proc.CombinedOutput()
 	if err != nil {
-		return []byte{}, err
+		return "", err
 	}
 	hasher.Write(out)
-	return hasher.Sum(nil), nil
+	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
 func (g *git) GetChangedPaths(sinceRef string) file.Paths {
@@ -86,8 +95,18 @@ func (g *git) GetChangedPaths(sinceRef string) file.Paths {
 }
 
 func (g *git) IsTracked(path string) bool {
-	proc := exec.Command("git", "ls-files", "--error-unmatch", path)
-	err := proc.Run()
+	relative_path, err := filepath.Rel(g.root, path)
+	if err != nil {
+		log.Warningf("%v is not inside %v", path, g.root)
+	} else {
+		for _, regex := range g.treatAsTracked {
+			if regex.Match([]byte(relative_path)) {
+				return true
+			}
+		}
+	}
+	proc := exec.Command("git", "ls-files", "--error-unmatch", relative_path)
+	err = proc.Run()
 	return err == nil
 }
 
@@ -117,16 +136,41 @@ func Create(pathInRepo string) (*git, error) {
 		if file.PathExists(filepath.Join(path, ".git")) {
 			// os.Chdir(g.GetRoot())
 			defaultUpstream := calculateDefaultUpstream(path)
-			return &git{root: path, defaultUpstream: defaultUpstream}, nil
+			root, err := filepath.EvalSymlinks(path)
+			if err != nil {
+				return nil, err
+			}
+			treatAsTracked := getTreatAsTracked(root)
+			return &git{root: root, defaultUpstream: defaultUpstream, treatAsTracked: treatAsTracked}, nil
 		}
 		path = filepath.Dir(path)
 	}
 }
 
+func getTreatAsTracked(gitRoot string) []*regexp.Regexp {
+	result := make([]*regexp.Regexp, 0)
+	configFilename := filepath.Join(gitRoot, "._treat_as_tracked")
+	content, err := file.ReadBytes(configFilename)
+	if err == nil {
+		for _, line := range strings.Split(string(content), "\n") {
+			if line == "" {
+				continue
+			}
+			log.Debugf("Treating files matching regex '%+v' as though they are tracked", line)
+			if re, err := regexp.Compile(line); err == nil {
+				result = append(result, re)
+			} else {
+				log.Warningf("Could not compile %v in %v: %+v", line, configFilename, err)
+			}
+		}
+	}
+	return result
+}
+
 func calculateDefaultUpstream(root string) string {
 	candidates := []string{"origin/main", "origin/master"}
 	if env := os.Getenv("GIT_DEFAULT_UPSTREAM"); len(env) > 0 {
-		candidates = []string{env}
+		return strings.TrimSpace(env)
 	}
 	args := append([]string{"branch", "--list", "--remote"}, candidates...)
 	proc := exec.Command("git", args...)
@@ -144,13 +188,13 @@ func calculateDefaultUpstream(root string) string {
 }
 
 type Git interface {
-	GetBranch() (branch []byte, err error)
-	GetWorkingHash() (ref []byte, err error)
+	GetBranch() (string, error)
+	GetWorkingHash() (string, error)
 	GetChangedPaths(sinceRef string) file.Paths
 	IsIgnored(path string) bool
 	IsTracked(path string) bool
 	GetRoot() (path string)
-	DetectBranchChange(notify chan []byte)
+	DetectBranchChange(notify chan<- string)
 	GetDefaultUpstream() string
 }
 
@@ -158,7 +202,7 @@ func (g *git) GetDefaultUpstream() string {
 	return g.defaultUpstream
 }
 
-func (g *git) DetectBranchChange(notify chan []byte) {
+func (g *git) DetectBranchChange(notify chan<- string) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		log.Fatal(err)
@@ -191,7 +235,7 @@ func (g *git) DetectBranchChange(notify chan []byte) {
 				if err != nil {
 					log.Fatal(err)
 				}
-				if !bytes.Equal(newBranch, branch) {
+				if newBranch != branch {
 					branch = newBranch
 					notify <- branch
 				}
