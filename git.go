@@ -88,11 +88,17 @@ func (g *git) GetChangedPaths(sinceRef string) file.Paths {
 }
 
 func (g *git) IsTracked(path string) bool {
-	for _, re := range g.treatAsTracked {
-		log.Infof("checking if %v matches %v", path, re)
-	}
-	proc := exec.Command("git", "ls-files", "--error-unmatch", path)
-	err := proc.Run()
+    relative_path, err := filepath.Rel(g.root, path)
+    if err != nil {
+        log.Warningf("%v is not inside %v", path, g.root)
+    } else {
+	for _, regex := range g.treatAsTracked {
+        if regex.Match([]byte(relative_path)) {
+            return true
+        }
+	} }
+	proc := exec.Command("git", "ls-files", "--error-unmatch", relative_path)
+	err = proc.Run()
 	return err == nil
 }
 
@@ -134,17 +140,19 @@ func Create(pathInRepo string) (*git, error) {
 }
 
 func getTreatAsTracked(gitRoot string) []*regexp.Regexp {
-	result := make([]*regexp.Regexp, 5)
-	configFilename := filepath.Join(gitRoot, ".treat_as_tracked")
+	result := make([]*regexp.Regexp, 0)
+	configFilename := filepath.Join(gitRoot, "._treat_as_tracked")
 	content, err := file.ReadBytes(configFilename)
 	if err == nil {
-		log.Infof("got content %v", content)
 		for _, line := range strings.Split(string(content), "\n") {
-			log.Infof("tracking %v too", line)
+			if line == "" {
+				continue
+			}
+			log.Debugf("Treating files matching regex '%+v' as though they are tracked", line)
 			if re, err := regexp.Compile(line); err == nil {
-				log.Warningf("Could not compile %v in %v", line, configFilename)
-			} else {
 				result = append(result, re)
+			} else {
+				log.Warningf("Could not compile %v in %v: %+v", line, configFilename, err)
 			}
 		}
 	}
