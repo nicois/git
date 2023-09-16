@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 type git struct {
 	root            string
 	defaultUpstream string
+	treatAsTracked  []*regexp.Regexp
 }
 
 func (g *git) GetBranch() ([]byte, error) {
@@ -86,6 +88,9 @@ func (g *git) GetChangedPaths(sinceRef string) file.Paths {
 }
 
 func (g *git) IsTracked(path string) bool {
+	for _, re := range g.treatAsTracked {
+		log.Infof("checking if %v matches %v", path, re)
+	}
 	proc := exec.Command("git", "ls-files", "--error-unmatch", path)
 	err := proc.Run()
 	return err == nil
@@ -117,10 +122,33 @@ func Create(pathInRepo string) (*git, error) {
 		if file.PathExists(filepath.Join(path, ".git")) {
 			// os.Chdir(g.GetRoot())
 			defaultUpstream := calculateDefaultUpstream(path)
-			return &git{root: path, defaultUpstream: defaultUpstream}, nil
+			root, err := filepath.EvalSymlinks(path)
+			if err != nil {
+				return nil, err
+			}
+			treatAsTracked := getTreatAsTracked(root)
+			return &git{root: root, defaultUpstream: defaultUpstream, treatAsTracked: treatAsTracked}, nil
 		}
 		path = filepath.Dir(path)
 	}
+}
+
+func getTreatAsTracked(gitRoot string) []*regexp.Regexp {
+	result := make([]*regexp.Regexp, 5)
+	configFilename := filepath.Join(gitRoot, ".treat_as_tracked")
+	content, err := file.ReadBytes(configFilename)
+	if err == nil {
+		log.Infof("got content %v", content)
+		for _, line := range strings.Split(string(content), "\n") {
+			log.Infof("tracking %v too", line)
+			if re, err := regexp.Compile(line); err == nil {
+				log.Warningf("Could not compile %v in %v", line, configFilename)
+			} else {
+				result = append(result, re)
+			}
+		}
+	}
+	return result
 }
 
 func calculateDefaultUpstream(root string) string {
