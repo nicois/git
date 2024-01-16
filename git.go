@@ -88,15 +88,16 @@ func (g *git) GetChangedPaths(sinceRef string) file.Paths {
 }
 
 func (g *git) IsTracked(path string) bool {
-    relative_path, err := filepath.Rel(g.root, path)
-    if err != nil {
-        log.Warningf("%v is not inside %v", path, g.root)
-    } else {
-	for _, regex := range g.treatAsTracked {
-        if regex.Match([]byte(relative_path)) {
-            return true
-        }
-	} }
+	relative_path, err := filepath.Rel(g.root, path)
+	if err != nil {
+		log.Warningf("%v is not inside %v", path, g.root)
+	} else {
+		for _, regex := range g.treatAsTracked {
+			if regex.Match([]byte(relative_path)) {
+				return true
+			}
+		}
+	}
 	proc := exec.Command("git", "ls-files", "--error-unmatch", relative_path)
 	err = proc.Run()
 	return err == nil
@@ -162,7 +163,7 @@ func getTreatAsTracked(gitRoot string) []*regexp.Regexp {
 func calculateDefaultUpstream(root string) string {
 	candidates := []string{"origin/main", "origin/master"}
 	if env := os.Getenv("GIT_DEFAULT_UPSTREAM"); len(env) > 0 {
-		candidates = []string{env}
+		return strings.TrimSpace(env)
 	}
 	args := append([]string{"branch", "--list", "--remote"}, candidates...)
 	proc := exec.Command("git", args...)
